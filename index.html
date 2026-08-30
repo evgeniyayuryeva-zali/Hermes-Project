@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Tidal — domain-warped flow field</title>
+<script>p5.disableFriendlyErrors = true;</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.3/p5.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #03060d; }
+  canvas { display: block; }
+  #hint {
+    position: fixed; left: 12px; bottom: 10px;
+    color: rgba(220, 235, 255, 0.55);
+    font: 12px/1.4 ui-monospace, "JetBrains Mono", Menlo, monospace;
+    letter-spacing: 0.04em; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="hint">click to inject energy · press [r] to reseed · [s] to save png</div>
+<script>
+const CONFIG = {
+  particleCount: 1400,
+  trailAlpha: 14,
+  noiseScale: 0.0028,
+  flowStrength: 1.2,
+  warpAmount: 2.4,
+  baseHue: 188,
+  hueSpread: 70,
+  speed: 1.6,
+  seed: 0,
+};
+
+// State
+let particles = [];
+let pg;          // offscreen trail buffer
+let t = 0;
+let lastClick = { x: 0, y: 0, t: 0 };
+
+function rng(a, b) { return a + (b - a) * Math.random(); }
+function hash01(n) { let s = Math.sin(n) * 43758.5453; return s - Math.floor(s); }
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  pixelDensity(1);
+  colorMode(HSB, 360, 100, 100, 100);
+  pg = createGraphics(width, height);
+  pg.colorMode(HSB, 360, 100, 100, 100);
+  pg.background(3, 60, 5);   // deep blue-black
+  spawnParticles();
+  noStroke();
+}
+
+function spawnParticles() {
+  particles = new Array(CONFIG.particleCount).fill(0).map(() => ({
+    x: Math.random() * width,
+    y: Math.random() * height,
+    px: 0, py: 0,
+    life: rng(120, 600),
+    age: Math.random() * 600,
+    hueOffset: rng(-CONFIG.hueSpread/2, CONFIG.hueSpread/2),
+    size: rng(0.6, 1.9),
+    energy: 0,
+  }));
+  particles.forEach(p => { p.px = p.x; p.py = p.y; });
+}
+
+function fbm(x, y) {
+  let v = 0, a = 1, f = 1, s = 0;
+  for (let i = 0; i < 4; i++) {
+    v += noise(x * f, y * f, t * 0.0003) * a;
+    s += a; a *= 0.5; f *= 2;
+  }
+  return v / s;
+}
+
+function draw() {
+  // fade trails (instead of clearing — accumulate)
+  pg.noStroke();
+  pg.fill(3, 60, 5, CONFIG.trailAlpha);
+  pg.rect(0, 0, width, height);
+
+  // Click energy decay
+  const sinceClick = t - lastClick.t;
+  const clickStrength = Math.max(0, 1 - sinceClick / 60);
+
+  for (let i = 0; i < particles.length; i++) {
+    const p = particles[i];
+
+    // Domain-warped flow field
+    const nx = p.x * CONFIG.noiseScale;
+    const ny = p.y * CONFIG.noiseScale;
+    const wx = fbm(nx + 5.2, ny + 1.3) - 0.5;
+    const wy = fbm(nx + 8.7, ny + 2.8) - 0.5;
+    const angle = (fbm(nx + wx * CONFIG.warpAmount,
+                       ny + wy * CONFIG.warpAmount) - 0.5) * Math.PI * 4;
+
+    // Click impulse
+    if (clickStrength > 0) {
+      const dx = p.x - lastClick.x, dy = p.y - lastClick.y;
+      const d2 = dx*dx + dy*dy;
+      const push = clickStrength * 80 / (1 + d2 * 0.00002);
+      p.x += (dx / Math.sqrt(d2 + 0.1)) * push;
+      p.y += (dy / Math.sqrt(d2 + 0.1)) * push;
+    }
+
+    p.px = p.x; p.py = p.y;
+    p.x += Math.cos(angle) * CONFIG.flowStrength * CONFIG.speed;
+    p.y += Math.sin(angle) * CONFIG.flowStrength * CONFIG.speed;
+    p.age++;
+
+    // Soft respawn when out of bounds or aged out
+    const oob = p.x < -10 || p.x > width+10 || p.y < -10 || p.y > height+10;
+    if (oob || p.age > p.life) {
+      p.x = Math.random() * width;
+      p.y = Math.random() * height;
+      p.px = p.x; p.py = p.y;
+      p.age = 0;
+      p.life = rng(120, 600);
+    }
+
+    // Color: hue shifts with life and position
+    const hue = (CONFIG.baseHue + p.hueOffset + (p.age / p.life) * 40) % 360;
+    const sat = 70 + Math.sin(p.age * 0.05) * 15;
+    const bri = 85 + Math.sin(p.age * 0.07 + p.hueOffset) * 12;
+    const alpha = Math.min(95, 20 + (1 - p.age / p.life) * 70);
+
+    pg.stroke(hue, sat, bri, alpha);
+    pg.strokeWeight(p.size);
+    pg.line(p.px, p.py, p.x, p.y);
+  }
+
+  // Composite trails + soft vignette + breathing haze
+  image(pg, 0, 0);
+  noStroke();
+  // subtle radial darken at edges
+  const ctx = drawingContext;
+  const g = ctx.createRadialGradient(width/2, height/2, Math.min(width,height)*0.3,
+                                     width/2, height/2, Math.max(width,height)*0.7);
+  g.addColorStop(0, "rgba(0,0,0,0)");
+  g.addColorStop(1, "rgba(3,6,13,0.55)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, width, height);
+
+  // Occasional glowing mote (head of newest few particles)
+  for (let i = 0; i < Math.min(60, particles.length); i++) {
+    const p = particles[i*7 % particles.length];
+    if (p.age < 200) {
+      const hue = (CONFIG.baseHue + p.hueOffset) % 360;
+      fill(hue, 30, 100, 70);
+      noStroke();
+      circle(p.x, p.y, p.size * 1.8);
+    }
+  }
+
+  t++;
+}
+
+function mousePressed() {
+  lastClick.x = mouseX; lastClick.y = mouseY; lastClick.t = t;
+}
+
+function keyPressed() {
+  if (key === 'r' || key === 'R') {
+    CONFIG.seed = Math.floor(Math.random() * 99999);
+    noiseSeed(CONFIG.seed); randomSeed(CONFIG.seed);
+    pg.background(3, 60, 5);
+    spawnParticles();
+  }
+  if (key === 's' || key === 'S') saveCanvas('tidal', 'png');
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  pg = createGraphics(width, height);
+  pg.colorMode(HSB, 360, 100, 100, 100);
+  pg.background(3, 60, 5);
+}
+</script>
+</body>
+</html>
